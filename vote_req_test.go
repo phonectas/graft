@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/graft/pb"
+	"github.com/phonectas/graft/pb"
 )
 
 // Test VoteRequests RPC in different states.

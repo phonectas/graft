@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/graft/pb"
+	"github.com/phonectas/graft/pb"
 )
 
 // Test HeartBeat RPC in different states.

@@ -1,4 +1,4 @@
-module github.com/nats-io/graft
+module github.com/phonectas/graft
 
 go 1.17
 

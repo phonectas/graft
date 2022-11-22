@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/graft/pb"
+	"github.com/phonectas/graft/pb"
 )
 
 // Dumb wait program to sync on callbacks, etc... Will timeout

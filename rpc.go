@@ -14,7 +14,7 @@
 package graft
 
 import (
-	"github.com/nats-io/graft/pb"
+	"github.com/phonectas/graft/pb"
 )
 
 // An RPCDriver allows multiple transports to be utilized for the

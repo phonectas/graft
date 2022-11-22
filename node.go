@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/graft/pb"
+	"github.com/phonectas/graft/pb"
 )
 
 type Node struct {
