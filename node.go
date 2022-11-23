@@ -20,6 +20,7 @@ package graft
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	mrand "math/rand"
 	"sync"
@@ -79,6 +80,12 @@ type Node struct {
 
 	// quit channel for shutdown on Close().
 	quit chan chan struct{}
+
+	minElectionTimeout time.Duration
+
+	maxElectionTimeout time.Duration
+
+	heartbeatInterval time.Duration
 }
 
 // ClusterInfo expresses the name and expected
@@ -89,6 +96,12 @@ type ClusterInfo struct {
 
 	// Expected members
 	Size int
+
+	// Override heartbeat interval in milliseconds
+	HeartbeatInterval int
+
+	// Override min election timeout in milliseconds
+	MinElectionTimeout int
 }
 
 // StateMachineHandler is used to interrogate an external state machine.
@@ -140,16 +153,32 @@ func New(info ClusterInfo, handler Handler, rpc RPCDriver, logPath string) (*Nod
 
 	// Assign an Id() and start us as a FOLLOWER with no known LEADER.
 	node := &Node{
-		id:            genUUID(),
-		info:          info,
-		state:         FOLLOWER,
-		rpc:           rpc,
-		handler:       handler,
-		leader:        NO_LEADER,
-		quit:          make(chan chan struct{}),
-		VoteRequests:  make(chan *pb.VoteRequest),
-		VoteResponses: make(chan *pb.VoteResponse),
-		HeartBeats:    make(chan *pb.Heartbeat),
+		id:                 genUUID(),
+		info:               info,
+		state:              FOLLOWER,
+		rpc:                rpc,
+		handler:            handler,
+		leader:             NO_LEADER,
+		quit:               make(chan chan struct{}),
+		VoteRequests:       make(chan *pb.VoteRequest),
+		VoteResponses:      make(chan *pb.VoteResponse),
+		HeartBeats:         make(chan *pb.Heartbeat),
+		minElectionTimeout: MIN_ELECTION_TIMEOUT,
+		maxElectionTimeout: MAX_ELECTION_TIMEOUT,
+		heartbeatInterval:  HEARTBEAT_INTERVAL,
+	}
+
+	if info.HeartbeatInterval > 0 {
+		node.heartbeatInterval = time.Duration(time.Millisecond * time.Duration(info.HeartbeatInterval))
+	}
+
+	if info.MinElectionTimeout > 0 {
+		node.minElectionTimeout = time.Duration(time.Millisecond * time.Duration(info.MinElectionTimeout))
+		node.maxElectionTimeout = node.minElectionTimeout * 2
+	}
+
+	if node.heartbeatInterval*5 < node.minElectionTimeout {
+		fmt.Printf("WARNING: Minimum election timeout should be at least 5x heartbeat interval\n")
 	}
 
 	// Init the log file and update our state.
@@ -189,7 +218,7 @@ func (n *Node) Id() string {
 
 func (n *Node) setupTimers() {
 	// Election timer
-	n.electTimer = time.NewTimer(randElectionTimeout())
+	n.electTimer = time.NewTimer(n.randElectionTimeout())
 }
 
 func (n *Node) clearTimers() {
@@ -246,7 +275,7 @@ func (n *Node) isRunning() bool {
 // Process loop for a LEADER.
 func (n *Node) runAsLeader() {
 	// Setup our heartbeat ticker
-	hb := time.NewTicker(HEARTBEAT_INTERVAL)
+	hb := time.NewTicker(n.heartbeatInterval)
 	defer hb.Stop()
 
 	for {
@@ -267,6 +296,7 @@ func (n *Node) runAsLeader() {
 			// We will stepdown if needed. This can happen if the
 			// request is from a newer term than ours.
 			if stepDown := n.handleVoteRequest(vreq); stepDown {
+				fmt.Printf("VoteRequest stepdown %+v\n", vreq)
 				n.switchToFollower(NO_LEADER)
 				return
 			}
@@ -275,6 +305,7 @@ func (n *Node) runAsLeader() {
 		case hb := <-n.HeartBeats:
 			// If they are newer, we will step down.
 			if stepDown := n.handleHeartBeat(hb); stepDown {
+				fmt.Printf("HeartBeats stepdown %+v\n", hb)
 				n.switchToFollower(hb.Leader)
 				return
 			}
@@ -448,6 +479,7 @@ func (n *Node) handleHeartBeat(hb *pb.Heartbeat) bool {
 
 	// Newer term
 	if hb.Term > n.term {
+		fmt.Println("stepdown newer term")
 		n.term = hb.Term
 		n.vote = NO_VOTE
 		stepDown = true
@@ -457,6 +489,7 @@ func (n *Node) handleHeartBeat(hb *pb.Heartbeat) bool {
 	// If we are candidate and someone asserts they are leader for an equal or
 	// higher term, step down.
 	if n.State() == CANDIDATE && hb.Term >= n.term {
+		fmt.Println("stepdown equal or higher term")
 		n.term = hb.Term
 		n.vote = NO_VOTE
 		stepDown = true
@@ -471,6 +504,7 @@ func (n *Node) handleHeartBeat(hb *pb.Heartbeat) bool {
 		if err := n.writeState(); err != nil {
 			n.handleError(err)
 			stepDown = true
+			fmt.Println("stepdown writestate error", err)
 		}
 	}
 
@@ -498,6 +532,7 @@ func (n *Node) handleVoteRequest(vreq *pb.VoteRequest) bool {
 		n.vote = NO_VOTE
 		n.leader = NO_LEADER
 		stepDown = true
+		fmt.Println("voterequest stepdown newer term, but not return yet")
 	}
 
 	// If we are the Leader, deny request unless we have seen
@@ -510,6 +545,7 @@ func (n *Node) handleVoteRequest(vreq *pb.VoteRequest) bool {
 	// If we have already cast a vote for this term, reject.
 	if n.vote != NO_VOTE && n.vote != vreq.Candidate {
 		n.rpc.SendVoteResponse(vreq.Candidate, deny)
+		fmt.Println("voterequest reject. stepdown:", stepDown)
 		return stepDown
 	}
 
@@ -525,6 +561,7 @@ func (n *Node) handleVoteRequest(vreq *pb.VoteRequest) bool {
 		n.setVote(NO_VOTE)
 		n.rpc.SendVoteResponse(vreq.Candidate, deny)
 		n.resetElectionTimeout()
+		fmt.Println("voterequest writestate error", err)
 		return true
 	}
 
@@ -619,14 +656,14 @@ func (n *Node) switchState(state State) {
 
 // Reset the election timeout with a random value.
 func (n *Node) resetElectionTimeout() {
-	n.electTimer.Reset(randElectionTimeout())
+	n.electTimer.Reset(n.randElectionTimeout())
 }
 
 // Generate a random timeout between MIN and MAX Election timeouts.
 // The randomness is required for the RAFT algorithm to be stable.
-func randElectionTimeout() time.Duration {
-	delta := mrand.Int63n(int64(MAX_ELECTION_TIMEOUT - MIN_ELECTION_TIMEOUT))
-	return (MIN_ELECTION_TIMEOUT + time.Duration(delta))
+func (n *Node) randElectionTimeout() time.Duration {
+	delta := mrand.Int63n(int64(n.maxElectionTimeout - n.minElectionTimeout))
+	return (n.minElectionTimeout + time.Duration(delta))
 }
 
 // processQuit will change or internal state to CLOSED and will close the
